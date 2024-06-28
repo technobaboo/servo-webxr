@@ -1,3 +1,4 @@
+use crate::egl::types::EGLContext;
 use crate::gl_utils::GlClearer;
 use crate::SurfmanGL;
 
@@ -9,7 +10,6 @@ use euclid::Size2D;
 use euclid::Transform3D;
 use euclid::Vector3D;
 use log::{error, warn};
-use openxr::d3d::{Requirements, SessionCreateInfoD3D11, D3D11};
 use openxr::Graphics;
 use openxr::{
     self, ActionSet, ActiveActionSet, ApplicationInfo, CompositionLayerFlags,
@@ -23,14 +23,10 @@ use sparkle::gl::GLuint;
 use std::collections::HashMap;
 use std::mem;
 use std::ops::Deref;
-use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use surfman::Adapter as SurfmanAdapter;
-use surfman::Context as SurfmanContext;
 use surfman::Device as SurfmanDevice;
-use surfman::Error as SurfmanError;
 use surfman::SurfaceTexture;
 use webxr_api;
 use webxr_api::util::{self, ClipPlanes};
@@ -70,14 +66,17 @@ use webxr_api::Viewport;
 use webxr_api::Viewports;
 use webxr_api::Views;
 use webxr_api::Visibility;
-use winapi::shared::dxgi;
-use winapi::shared::dxgiformat;
-use winapi::shared::winerror::{DXGI_ERROR_NOT_FOUND, S_OK};
-use winapi::um::d3d11::ID3D11Texture2D;
-use winapi::Interface;
-use wio::com::ComPtr;
 
 mod input;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux::*;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows::*;
+
 use input::OpenXRInput;
 
 const HEIGHT: f32 = 1.4;
@@ -171,12 +170,17 @@ impl<Eye> ViewInfo<Eye> {
 }
 
 pub struct OpenXrDiscovery {
+    egl: EGLContext,
     context_menu_provider: Option<Box<dyn ContextMenuProvider>>,
 }
 
 impl OpenXrDiscovery {
-    pub fn new(context_menu_provider: Option<Box<dyn ContextMenuProvider>>) -> Self {
+    pub fn new(
+        egl: EGLContext,
+        context_menu_provider: Option<Box<dyn ContextMenuProvider>>,
+    ) -> Self {
         Self {
+            egl,
             context_menu_provider,
         }
     }
@@ -210,7 +214,7 @@ pub fn create_instance(
     };
 
     let mut exts = ExtensionSet::default();
-    exts.khr_d3d11_enable = true;
+    pick_extensions(&mut exts);
     if supports_hands {
         exts.ext_hand_tracking = true;
     }
@@ -241,70 +245,6 @@ pub fn create_instance(
     })
 }
 
-fn get_matching_adapter(
-    requirements: &Requirements,
-) -> Result<ComPtr<dxgi::IDXGIAdapter1>, String> {
-    unsafe {
-        let mut factory_ptr: *mut dxgi::IDXGIFactory1 = ptr::null_mut();
-        let result = dxgi::CreateDXGIFactory1(
-            &dxgi::IDXGIFactory1::uuidof(),
-            &mut factory_ptr as *mut _ as *mut _,
-        );
-        assert_eq!(result, S_OK);
-        let factory = ComPtr::from_raw(factory_ptr);
-
-        let index = 0;
-        loop {
-            let mut adapter_ptr = ptr::null_mut();
-            let result = factory.EnumAdapters1(index, &mut adapter_ptr);
-            if result == DXGI_ERROR_NOT_FOUND {
-                return Err("No matching adapter".to_owned());
-            }
-            assert_eq!(result, S_OK);
-            let adapter = ComPtr::from_raw(adapter_ptr);
-            let mut adapter_desc = mem::zeroed();
-            let result = adapter.GetDesc1(&mut adapter_desc);
-            assert_eq!(result, S_OK);
-            let adapter_luid = &adapter_desc.AdapterLuid;
-            if adapter_luid.LowPart == requirements.adapter_luid.LowPart
-                && adapter_luid.HighPart == requirements.adapter_luid.HighPart
-            {
-                return Ok(adapter);
-            }
-        }
-    }
-}
-
-pub fn create_surfman_adapter() -> Option<SurfmanAdapter> {
-    let instance = create_instance(false, false).ok()?;
-    let system = instance
-        .instance
-        .system(FormFactor::HEAD_MOUNTED_DISPLAY)
-        .ok()?;
-
-    let requirements = D3D11::requirements(&instance.instance, system).ok()?;
-    let adapter = get_matching_adapter(&requirements).ok()?;
-    Some(SurfmanAdapter::from_dxgi_adapter(adapter.up()))
-}
-
-fn pick_format(formats: &[dxgiformat::DXGI_FORMAT]) -> dxgiformat::DXGI_FORMAT {
-    // TODO: extract the format from surfman's device and pick a matching
-    // valid format based on that. For now, assume that eglChooseConfig will
-    // gravitate to B8G8R8A8.
-    warn!("Available formats: {:?}", formats);
-    for format in formats {
-        match *format {
-            dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM => return *format,
-            //dxgiformat::DXGI_FORMAT_R8G8B8A8_UNORM => return *format,
-            f => {
-                warn!("Backend requested unsupported format {:?}", f);
-            }
-        }
-    }
-
-    panic!("No formats supported amongst {:?}", formats);
-}
-
 impl DiscoveryAPI<SurfmanGL> for OpenXrDiscovery {
     fn request_session(
         &mut self,
@@ -312,6 +252,7 @@ impl DiscoveryAPI<SurfmanGL> for OpenXrDiscovery {
         init: &SessionInit,
         xr: SessionBuilder<SurfmanGL>,
     ) -> Result<WebXrSession, Error> {
+        warn!("WebXR OpenXR does not support session");
         if self.supports_session(mode) {
             let needs_hands = init.feature_requested("hand-tracking");
             let needs_secondary =
@@ -328,8 +269,10 @@ impl DiscoveryAPI<SurfmanGL> for OpenXrDiscovery {
             }
             let granted_features = init.validate(mode, &supported_features)?;
             let context_menu_provider = self.context_menu_provider.take();
+            let egl_context = self.egl as usize;
             xr.spawn(move |grand_manager| {
                 OpenXrDevice::new(
+                    egl_context as *const _,
                     instance,
                     granted_features,
                     context_menu_provider,
@@ -366,7 +309,7 @@ impl DiscoveryAPI<SurfmanGL> for OpenXrDiscovery {
 }
 
 struct OpenXrDevice {
-    session: Arc<Session<D3D11>>,
+    session: Arc<Session<OpenXRGraphicsType>>,
     instance: Instance,
     events: EventBuffer,
     frame_waiter: FrameWaiter,
@@ -399,28 +342,28 @@ struct SharedData {
 }
 
 struct OpenXrLayerManager {
-    session: Arc<Session<D3D11>>,
+    session: Arc<Session<OpenXRGraphicsType>>,
     shared_data: Arc<Mutex<Option<SharedData>>>,
-    frame_stream: FrameStream<D3D11>,
+    frame_stream: FrameStream<OpenXRGraphicsType>,
     layers: Vec<(ContextId, LayerId)>,
     openxr_layers: HashMap<LayerId, OpenXrLayer>,
     clearer: GlClearer,
 }
 
 struct OpenXrLayer {
-    swapchain: Swapchain<D3D11>,
+    swapchain: Swapchain<OpenXRGraphicsType>,
     depth_stencil_texture: Option<GLuint>,
     size: Size2D<i32, Viewport>,
-    images: Vec<<D3D11 as Graphics>::SwapchainImage>,
+    images: Vec<<OpenXRGraphicsType as Graphics>::SwapchainImage>,
     surface_textures: Vec<Option<SurfaceTexture>>,
     waited: bool,
 }
 
 impl OpenXrLayerManager {
     fn new(
-        session: Arc<Session<D3D11>>,
+        session: Arc<Session<OpenXRGraphicsType>>,
         shared_data: Arc<Mutex<Option<SharedData>>>,
-        frame_stream: FrameStream<D3D11>,
+        frame_stream: FrameStream<OpenXRGraphicsType>,
     ) -> OpenXrLayerManager {
         let layers = Vec::new();
         let openxr_layers = HashMap::new();
@@ -434,41 +377,11 @@ impl OpenXrLayerManager {
             clearer,
         }
     }
-
-    fn create_session(
-        device: &SurfmanDevice,
-        instance: &Instance,
-        system: SystemId,
-    ) -> Result<(Session<D3D11>, FrameWaiter, FrameStream<D3D11>), Error> {
-        // Get the current surfman device and extract its D3D device. This will ensure
-        // that the OpenXR runtime's texture will be shareable with surfman's surfaces.
-        let native_device = device.native_device();
-        let d3d_device = native_device.d3d11_device;
-
-        // FIXME: we should be using these graphics requirements to drive the actual
-        //        d3d device creation, rather than assuming the device that surfman
-        //        already created is appropriate. OpenXR returns a validation error
-        //        unless we call this method, so we call it and ignore the results
-        //        in the short term.
-        let _requirements = D3D11::requirements(&instance, system)
-            .map_err(|e| Error::BackendSpecific(format!("D3D11::requirements {:?}", e)))?;
-
-        unsafe {
-            instance
-                .create_session::<D3D11>(
-                    system,
-                    &SessionCreateInfoD3D11 {
-                        device: d3d_device as *mut _,
-                    },
-                )
-                .map_err(|e| Error::BackendSpecific(format!("Instance::create_session {:?}", e)))
-        }
-    }
 }
 
 impl OpenXrLayer {
     fn new(
-        swapchain: Swapchain<D3D11>,
+        swapchain: Swapchain<OpenXRGraphicsType>,
         depth_stencil_texture: Option<GLuint>,
         size: Size2D<i32, Viewport>,
     ) -> Result<OpenXrLayer, Error> {
@@ -488,31 +401,25 @@ impl OpenXrLayer {
         })
     }
 
-    fn get_surface_texture(
-        &mut self,
-        device: &mut SurfmanDevice,
-        context: &mut SurfmanContext,
-        index: usize,
-    ) -> Result<&SurfaceTexture, SurfmanError> {
-        let result = self
-            .surface_textures
-            .get_mut(index)
-            .ok_or(SurfmanError::Failed)?;
-        if let Some(result) = result {
-            return Ok(result);
-        }
-        unsafe {
-            let image = ComPtr::from_raw(self.images[index] as *mut ID3D11Texture2D);
-            image.AddRef();
-            let surface_texture = device.create_surface_texture_from_texture(
-                context,
-                &self.size.to_untyped(),
-                image,
-            )?;
-            *result = Some(surface_texture);
-        }
-        result.as_ref().ok_or(SurfmanError::Failed)
-    }
+    // fn get_surface_texture(
+    //     &mut self,
+    //     device: &mut SurfmanDevice,
+    //     context: &mut SurfmanContext,
+    //     index: usize,
+    // ) -> Result<&SurfaceTexture, SurfmanError> {
+    //     let surface_texture_slot = self
+    //         .surface_textures
+    //         .get_mut(index)
+    //         .ok_or(SurfmanError::Failed)?;
+    //     if let Some(surface_texture) = surface_texture_slot {
+    //         return Ok(surface_texture);
+    //     }
+    //     let new_surface_texture =
+    //         surfman_texture_from_swapchain_texture(self.images[index], self.size, device, context)
+    //             .ok_or(SurfmanError::Failed)?;
+    //     surface_texture_slot.replace(new_surface_texture);
+    //     Ok(surface_texture_slot.as_ref().unwrap())
+    // }
 }
 
 impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
@@ -558,6 +465,7 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
             let gl = contexts
                 .bindings(device, context_id)
                 .ok_or(Error::NoMatchingDevice)?;
+
             let depth_stencil_texture = gl.gen_textures(1)[0];
             gl.bind_texture(gl::TEXTURE_2D, depth_stencil_texture);
             gl.tex_image_2d(
@@ -767,9 +675,6 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
         layers
             .iter()
             .map(|&(context_id, layer_id)| {
-                let context = contexts
-                    .context(device, context_id)
-                    .ok_or(Error::NoMatchingDevice)?;
                 let openxr_layer = openxr_layers
                     .get_mut(&layer_id)
                     .ok_or(Error::NoMatchingDevice)?;
@@ -785,13 +690,11 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
                     })?;
                 openxr_layer.waited = true;
 
-                let color_surface_texture = openxr_layer
-                    .get_surface_texture(device, context, image as usize)
-                    .map_err(|e| {
-                        Error::BackendSpecific(format!("Layer::get_surface_texture {:?}", e))
-                    })?;
-                let color_texture = device.surface_texture_object(color_surface_texture);
-                let color_target = device.surface_gl_texture_target();
+                let color_texture = *openxr_layer
+                    .images
+                    .get(image as usize)
+                    .ok_or_else(|| Error::BackendSpecific(format!("Layer::get_surface_texture")))?;
+                let color_target = gl::TEXTURE_2D;
                 let depth_stencil_texture = openxr_layer.depth_stencil_texture;
                 let texture_array_index = None;
                 let origin = Point2D::new(0, 0);
@@ -813,6 +716,7 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
                         viewport,
                     })
                     .collect();
+
                 clearer.clear(
                     device,
                     contexts,
@@ -847,6 +751,7 @@ fn image_rect(viewport: Rect<i32, Viewport>) -> openxr::Rect2Di {
 
 impl OpenXrDevice {
     fn new(
+        egl_context: EGLContext,
         instance: CreatedInstance,
         granted_features: Vec<String>,
         context_menu_provider: Option<Box<dyn ContextMenuProvider>>,
@@ -866,9 +771,10 @@ impl OpenXrDevice {
         let shared_data_clone = shared_data.clone();
         let mut data = shared_data.lock().unwrap();
 
+        let egl_context = egl_context as usize;
         let layer_manager = grand_manager.create_layer_manager(move |device, _| {
             let (session, frame_waiter, frame_stream) =
-                OpenXrLayerManager::create_session(device, &instance_clone, system)?;
+                create_session(device, egl_context as *const _, &instance_clone, system)?;
             let session = Arc::new(session);
             init_tx
                 .send((session.clone(), frame_waiter))
@@ -1429,6 +1335,14 @@ impl DeviceAPI for OpenXrDevice {
 
     fn granted_features(&self) -> &[String] {
         &self.granted_features
+    }
+
+    fn request_hit_test(&mut self, _source: webxr_api::HitTestSource) {
+        panic!("This device does not support requesting hit tests");
+    }
+
+    fn cancel_hit_test(&mut self, _id: webxr_api::HitTestId) {
+        panic!("This device does not support hit tests");
     }
 }
 

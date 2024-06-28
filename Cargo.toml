@@ -1,5 +1,9 @@
 [workspace]
-members = [
-    "webxr",
-    "webxr-api"
-]
+members = ["webxr", "webxr-api"]
+
+[patch.crates-io.openxr]
+git = "https://github.com/technobaboo/openxrs.git"
+branch = "monado-egl"
+
+[patch.crates-io.surfman]
+path = "../surfman"

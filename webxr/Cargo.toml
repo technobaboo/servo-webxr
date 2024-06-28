@@ -21,7 +21,7 @@ build = "build.rs"
 path = "lib.rs"
 
 [features]
-default = ["x11"]
+default = ["x11", "openxr-api"]
 x11 = ["surfman/sm-x11"]
 angle = ["surfman/sm-angle"]
 egl = []
@@ -31,7 +31,14 @@ headless = []
 ipc = ["webxr-api/ipc", "serde"]
 googlevr = ["gvr-sys", "android_injected_glue", "gles"]
 magicleap = ["egl"]
-openxr-api = ["angle", "openxr", "winapi", "wio", "surfman/sm-angle-default"]
+openxr-api = [
+    "angle",
+    "egl",
+    "openxr",
+    "winapi",
+    "wio",
+    "surfman/sm-angle-default",
+]
 profile = ["webxr-api/profile"]
 
 [dependencies]
@@ -47,7 +54,11 @@ surfman = { version = "0.9", features = ["chains"] }
 time = "0.1.42"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["dxgi", "d3d11", "winerror"], optional = true }
+winapi = { version = "0.3", features = [
+    "dxgi",
+    "d3d11",
+    "winerror",
+], optional = true }
 wio = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]

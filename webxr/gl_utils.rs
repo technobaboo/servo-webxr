@@ -6,6 +6,10 @@ use crate::SurfmanGL;
 use sparkle::gl;
 use sparkle::gl::GLuint;
 use sparkle::gl::Gl;
+use sparkle::gl::TexImageSource;
+use sparkle::gl::RGBA;
+use sparkle::gl::RGBA8;
+use sparkle::gl::UNSIGNED_BYTE;
 use std::collections::HashMap;
 use surfman::Device as SurfmanDevice;
 use webxr_api::ContextId;
@@ -42,6 +46,8 @@ impl GlClearer {
                     gl.get_integer_v(gl::READ_FRAMEBUFFER_BINDING, &mut bound_fbos[1..]);
                 }
 
+                gl.bind_texture(color_target, color);
+
                 // Generate and set attachments of a new FBO
                 let fbo = gl.gen_framebuffers(1)[0];
 
@@ -60,6 +66,7 @@ impl GlClearer {
                     depth_stencil.unwrap_or(0),
                     0,
                 );
+                dbg!(gl.check_framebuffer_status(gl::FRAMEBUFFER));
 
                 // Restore the GL state
                 gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, bound_fbos[0] as GLuint);

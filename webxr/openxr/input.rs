@@ -1,5 +1,5 @@
 use euclid::RigidTransform3D;
-use openxr::d3d::D3D11;
+use openxr::Graphics;
 use openxr::{
     self, Action, ActionSet, Binding, FrameState, Hand as HandEnum, HandJoint, HandTracker,
     Instance, Path, Posef, Session, Space, SpaceLocationFlags,
@@ -38,10 +38,10 @@ pub struct Frame {
 }
 
 impl ClickState {
-    fn update(
+    fn update<G: Graphics>(
         &mut self,
         action: &Action<bool>,
-        session: &Session<D3D11>,
+        session: &Session<G>,
         menu_selected: bool,
     ) -> (/* is_active */ bool, Option<SelectEvent>) {
         let click = action.state(session, Path::NULL).unwrap();
@@ -99,11 +99,11 @@ fn hand_str(h: Handedness) -> &'static str {
 }
 
 impl OpenXRInput {
-    pub fn new(
+    pub fn new<G: Graphics>(
         id: InputId,
         handedness: Handedness,
         action_set: &ActionSet,
-        session: &Session<D3D11>,
+        session: &Session<G>,
         needs_hands: bool,
     ) -> Self {
         let hand = hand_str(handedness);
@@ -169,9 +169,9 @@ impl OpenXRInput {
         }
     }
 
-    pub fn setup_inputs(
+    pub fn setup_inputs<G: Graphics>(
         instance: &Instance,
-        session: &Session<D3D11>,
+        session: &Session<G>,
         needs_hands: bool,
     ) -> (ActionSet, Self, Self) {
         let action_set = instance.create_action_set("hands", "Hands", 0).unwrap();
@@ -252,9 +252,9 @@ impl OpenXRInput {
         ret
     }
 
-    pub fn frame(
+    pub fn frame<G: Graphics>(
         &mut self,
-        session: &Session<D3D11>,
+        session: &Session<G>,
         frame_state: &FrameState,
         base_space: &Space,
         viewer: &RigidTransform3D<f32, Viewer, Native>,
